@@ -1,0 +1,37 @@
+####Imports####
+from snakemake.utils import min_version
+import pandas as pd
+from os import path
+
+##### Set minimum snakemake version #####
+min_version("6.4.1")
+
+configfile: "workflow/schemas/config.yml"
+
+##### Load rules #####
+include:"rules/common.smk"
+include:"rules/fastqc.smk"
+include:"rules/cutadapt.smk"
+include:"rules/umi_tools.smk"
+include:"rules/star.smk"
+include:"rules/samtools.smk"
+include:"rules/bedtools.smk"
+
+rule all:
+    input:
+        qc_raw_reads(),
+        trim_reads(),
+        qc_trimmed_reads(),
+        qc_umi_extracted_reads(),
+        cutadapt_second_pass(),
+        qc_template_switch_trimmed_reads(),
+        index_genome(),
+        align(),
+        sort_to_bam(),
+        index_bams(),
+        remove_duplicates(),
+        get_bigwigs(),
+        expand_bigwigs(),
+        join_bigwigs(),
+        join_tracks(),
+        log_convert()

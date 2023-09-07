@@ -1,0 +1,6 @@
+channels:
+  - bioconda
+  - conda-forge
+
+dependencies:
+  - wiggletools=1.2.11
