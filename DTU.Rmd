@@ -1,0 +1,276 @@
+---
+title: "DTU"
+author: "Adrián Romero Casiano"
+date: '2023-06-09'
+output: html_document
+---
+
+# Packages
+```{r Packages, results='hide', message=FALSE, warning=FALSE, eval=TRUE}
+library(tidyverse)
+library(tidylog)
+library(magrittr)
+library(stringr)
+library(reshape2)
+library(CAGEfightR)
+library(BiocParallel)
+library(DESeq2)
+library(DRIMSeq)
+library(DEXSeq)
+library(stageR)
+```
+
+
+## Data Loading
+```{r Data loading, message=FALSE, warning=FALSE, eval=TRUE}
+TCs <- readRDS("./TSS_calling/TCs.rds")
+# Remove the clusters non assigned to a gene or a transcript
+TCs <- subset(TCs, !is.na(geneID) & !is.na(txID))
+# Generate the count matrix
+TCs <- calcTPM(TCs, inputAssay='counts', outputAssay='TPM', outputColumn='totalTags')
+counts <- TCs@assays@data@listData[["TPM"]]
+# Add the geneID and txType column to the count matrix
+counts <- data.frame(counts, rowRanges(TCs)$geneID,rowRanges(TCs)$txType, rowRanges(TCs)$txID)
+# Set the TCs id as feature_id
+counts$feature_id <- rownames(counts)
+colnames(counts)[5:7] <- c("gene_id","txType", "txID")
+
+metadata <- data.frame(colData(TCs)[,1:3])
+prom_cats <-c("promoter","fiveUTR","intergenic")
+```
+
+&nbsp;
+
+## DRIMSeq DE analysis
+```{r DRIM DE, message=FALSE, warning= FALSE, eval=TRUE}
+# Extract the TSS counts for each condition
+col0_counts <- counts[1:2]
+minu_counts <- counts[3:4]
+col0_counts_sum <- data.frame(rowSums(col0_counts))
+minu_counts_sum <- data.frame(rowSums(minu_counts))
+counts$col0_sum <- col0_counts_sum[,1]
+counts$minu_sum <- minu_counts_sum[,1]
+
+# Correct the low expression values for each sample to improve further DTU
+# First compute the total expression for each gene
+gene_exp <- data.frame(row.names = unique(counts$gene_id))
+for (i in metadata$Name) {
+  gene_rep_exp <- aggregate(counts[,i] ~ gene_id, data = counts, sum)
+  gene_exp <- add_column(gene_exp,gene_rep_exp[,2])
+}
+# Set the names of each replicate and calculate the 5% of each gene expression
+colnames(gene_exp) <- paste0(metadata$Name, " 5%")
+gene_exp <- gene_exp * 0.05
+gene_exp$gene_id <- rownames(gene_exp )
+
+# Combine both data frames
+new_counts <- merge(counts, gene_exp, by = "gene_id")
+
+# Iterate the ifelse function through the columns
+for (i in names(new_counts)[2:5]) {
+  orig_value <- new_counts[,i ]
+  threshold_value <- new_counts[, paste0( i, " 5%")]
+  
+  new_counts[,i] <- ifelse(orig_value < threshold_value,
+                       threshold_value,
+                       orig_value)
+}
+rownames(new_counts) <- new_counts$feature_id
+# Delete the threshold columns
+new_counts <- new_counts[1:10]
+
+# Generate a metadata data frame
+metadata2 <- metadata[1:3]
+colnames(metadata2) <- c("sample_id", "Condition", "Replicate")
+
+#Run DRIMSeq analysis
+drim_object <- dmDSdata(counts= new_counts, samples= metadata2)
+# Previous filtering of TCs based on its expression in genes in all samples
+drim_object <- dmFilter(drim_object,
+              min_samps_feature_expr= 2,
+              min_samps_feature_prop= 2,
+              min_samps_gene_expr= 4)
+# Create of a design matrix
+design_full <- model.matrix(~Condition, data=DRIMSeq::samples(drim_object))
+colnames(design_full)
+
+# Estimate the model parameters
+set.seed(1)
+
+system.time({
+  drim_object <- dmPrecision(drim_object, design=design_full)
+  drim_object <- dmFit(drim_object, design=design_full)
+  drim_object <- dmTest(drim_object, coef="Conditionminu")
+})
+```
+
+&nbsp;
+
+### Modify and extract results from DRIMSeq analysis
+```{r Extract results, message=FALSE, warning=FALSE, eval=TRUE}
+# Generate the results object
+transcript_result <- results(drim_object, level= "feature")
+gene_result <- results(drim_object, level = "gene")
+
+# Check for results with p-value labelled as NA
+table(is.na(transcript_result$adj_pvalue))
+
+# Extract the significant results
+sig_results <- which(transcript_result$adj_pvalue < 0.05)
+sig_results <- transcript_result[sig_results,]
+
+# Add counts data to the results data frames
+transcript_result <- merge(transcript_result, new_counts[6:10], by = "feature_id")
+sig_results <- merge(sig_results, new_counts[6:10], by = "feature_id")
+
+rownames(transcript_result) <- transcript_result$feature_id
+rownames(sig_results) <- sig_results$feature_id
+```
+
+&nbsp;
+
+### stageR screening post DRIMSEQ Analysi
+```{r stageR screening, message=FALSE, warning=FALSE, eval=TRUE}
+# Generate the stageR objects
+stage_object <- merge(gene_result, transcript_result,  by = "gene_id", suffixes = c("gene", "transcript"))
+stage_object <-stage_object[, c(1,4,6,9)]
+colnames(stage_object) <- c("geneID", "gene", "txID", "transcript")
+stage_object <- tidyr::drop_na(stage_object, c("gene", "transcript"))
+substr(stage_object$txID, 5, 5) <- "_"
+
+# Generate the 1 column matrices with the p-values for each contrast and the 2 column identifier
+pScreen <- stage_object$gene
+names(pScreen) <- stage_object$geneID
+pConfirmation <- matrix(stage_object$transcript, ncol = 1)
+rownames(pConfirmation) <- stage_object$txID
+tx2gene <- stage_object[,c(3,1)]
+
+# Perform the stageR correction analysis
+stageRObj <- stageR::stageRTx(pScreen=pScreen, pConfirmation=pConfirmation,
+                      pScreenAdjusted=FALSE, tx2gene=tx2gene)
+stageRObj <- stageR::stageWiseAdjustment(stageRObj, method="dtu", alpha=0.05, allowNA = TRUE)
+suppressWarnings({
+  drim.padj <- stageR::getAdjustedPValues(stageRObj, order=FALSE,
+                                  onlySignificantGenes=TRUE)
+})
+
+# Filter the stageR results 
+stage_sig_results <- which(drim.padj$transcript < 0.05)
+stage_sig_results <- drim.padj[stage_sig_results,]
+#substr(stage_sig_results$txID, 5, 5) <- ":"        ### Esta linea solo se utiliza cuando mantienes los "feature_id" originales
+stage_sig_results <- merge(transcript_result, stage_sig_results, by.x = "feature_id", by.y = "txID")
+stage_sig_results <- stage_sig_results[is_in(stage_sig_results$txType, prom_cats),]
+# Check for overlap between base results and stageR results
+sig_results <- which(transcript_result$adj_pvalue < 0.05)
+sig_results <- transcript_result[sig_results,]
+sig_results <- sig_results[is_in(sig_results$txType, prom_cats),]
+overlap_sig_results <- merge(stage_sig_results, sig_results, by = "feature_id")
+
+```
+
+&nbsp;
+
+## DEXSEQ DE analysis
+```{r message=FALSE, warning=FALSE, eval=TRUE}
+# Generate DEXSEQ object
+dexseq_object <- DEXSeqDataSet(countData=round(as.matrix(counts[1:4])),
+                     sampleData=metadata,
+                     design=~sample + exon + Condition:exon,
+                     featureID=counts$feature_id,
+                     groupID=counts$gene_id)
+
+# Estimate the model parameters
+system.time({
+  dexseq_object <- estimateSizeFactors(dexseq_object)
+  dexseq_object <- estimateDispersions(dexseq_object, quiet=TRUE)
+  dexseq_object <- testForDEU(dexseq_object, reducedModel=~sample + exon)
+})
+
+# Extract results
+dexseq_res <- data.frame(DEXSeqResults(dexseq_object, independentFiltering=TRUE))
+qval <- perGeneQValue(DEXSeqResults(dexseq_object, independentFiltering=TRUE))
+dexseq_gene_res <- data.frame(gene=names(qval),qval)
+table(dexseq_gene_res$qval < 0.05)
+
+dex_sig_results <- drop_na(dexseq_res[dexseq_res$padj < 0.05,])
+colnames(dex_sig_results)[1] <- "gene_id"
+single_res <- unique(dex_sig_results$gene_id)
+```
+
+&nbsp;
+
+### stageR screening
+```{r stageR screening, message=FALSE, warning=FALSE, eval=TRUE}
+# Generate the 1 column matrices with the p-values for each contrast and the 2 column identifier
+pScreen <- qval
+names(pScreen) <- names(qval)
+pConfirmation <- matrix(dexseq_res$pvalue, ncol = 1)
+rownames(pConfirmation) <- dexseq_res$featureID
+tx2gene <- dexseq_res[,c(2,1)]
+
+# Perform the stageR correction analysis
+stageRObj <- stageR::stageRTx(pScreen=pScreen, pConfirmation=pConfirmation,
+                      pScreenAdjusted=FALSE, tx2gene=tx2gene)
+stageRObj <- stageR::stageWiseAdjustment(stageRObj, method="dtu", alpha=0.05, allowNA = TRUE)
+suppressWarnings({
+  dex.padj <- stageR::getAdjustedPValues(stageRObj, order=FALSE,
+                                  onlySignificantGenes=TRUE)
+})
+
+# Filter the stageR results 
+sig_results <- which(dex.padj$transcript < 0.05)
+sig_results <- dex.padj[sig_results,]
+
+dex_sig_results <- merge(dex_sig_results[1:5], sig_results[2:4], by.x = "featureID", by.y = "txID")
+dex_sig_results <- merge(counts[, c(6:8)],dex_sig_results, by.x = "feature_id", by.y = "featureID")
+dex_sig_results <- dex_sig_results[is_in(dex_sig_results$txType, prom_cats),]
+```
+&nbsp;
+
+## DESEQ2 DEA at gene level
+```{r DE analysis genelvl, warning=FALSE, message=FALSE, eval=TRUE}
+# Quantify expression at Gene-level from TSS data
+genelevel <- quantifyGenes(TCs, genes='geneID', inputAssay='counts')
+# Create DESeq2 object with blank design
+# Count matrix without TPM normalization
+gene_counts <- data.frame(genelevel@assays@data@listData[["counts"]])
+
+dds <- DESeqDataSetFromMatrix((as.matrix(gene_counts)), 
+                                    metadata, ~Condition)
+# DESEQ2 Analysis
+dds <- DESeq(dds)
+# Extract DESEQ results
+deseq_result <- DESeq2::results(dds, contrast = c("Condition", "col0", "minu"),
+                   alpha = 0.05)
+resultsNames(dds)
+deseq_result2 <- lfcShrink(dds, coef = "Condition_minu_vs_col0")
+plotMA(deseq_result2)
+
+# Extract significant results
+sig_results <- which(deseq_result$padj < 0.05)
+sig_results <- deseq_result[sig_results,]
+colnames(sig_results)[1]<- "gene_id"
+```
+
+&nbsp;
+
+## Data export
+```{r Data saving, message=FALSE, warning=FALSE, eval=TRUE}
+# Save DRIMSEQ model and results
+saveRDS(drim_object, "./DRIMSEQ_Models/drim_TCs_20bp.rds")
+saveRDS(transcript_result, "./DRIMSEQ_Models/transcript_result20bp.rds")
+saveRDS(gene_result, "./DRIMSEQ_Models/gene_result20bp.rds")
+
+# Save stageR results
+saveRDS(drim.padj, "./DRIMSEQ_Models/stageR_results.rds")
+saveRDS(stage_sig_results, "./DRIMSEQ_Models/stageR_sig_results.rds")
+
+# Save DEXSEQ Results
+saveRDS(dex_sig_results, "./DEXSEQ_Models/dexseq_sig_results.rds")
+write.csv(dex_sig_results, file = "./DEXSEQ_Models/dexseq_results.csv", quote = FALSE)
+
+# Save DESEQ2 results
+saveRDS(sig_results, "./DESeq2/deseq2_genelvl_sig_results.rds")
+saveRDS(deseq_result, "DESeq2/deseq2_genelvl_results.rds")
+write.csv(sig_results, file = "./DESeq2/deseq2_genelvl_results.csv", quote = FALSE)
+```

@@ -1,0 +1,341 @@
+---
+title: "TSS Calling"
+author: "Adrián Romero Casiano"
+date: '2023-06-09'
+output: html_document
+---
+
+# PART 1: Locating, quantifying and annotating TSSs
+
+## PACKAGES
+```{r Packages, results='hide', warning=FALSE, message=FALSE, eval=TRUE}
+library(tidyverse)
+library(tidylog)
+library(magrittr)
+library(reshape2)
+library(CAGEfightR)
+library(GenomicFeatures)
+library(RColorBrewer)
+library(BiocParallel)
+library(TeMPO)
+library(BSgenome.Athaliana.TAIR.TAIR9)
+library(org.At.tair.db)
+library(ggplot2)
+library(ggforce)
+library(ggthemes)
+```
+
+&nbsp;
+
+## Data of each genotype 
+```{r Subdata, message=FALSE, warning=FALSE, eval=TRUE}
+# Generate the dataset for col0 and minu separately
+genome <- read.table("./annotation/TAIR10.chr_sizes")
+colnames(genome) <- c("seqnames", "seqlengths")
+genome$isCircular <- c(rep(FALSE, 5), rep(TRUE, 2))
+
+genomeInfo <- Seqinfo(genome$seqnames, genome$seqlengths, genome$isCircular, "TAIR10")
+genomeInfo
+
+## Col0 TCs
+col0_metadata = data.frame(
+  Name = c(paste0("col0_rep", c(1:3))),
+  Condition = c(rep("col0", 3)),
+  Replicate = rep(c(1, 2, 3)),
+  BigwigPlus = c(
+    paste0("./bw_files/col0_rep", c(1:3), ".forward.expanded.bw")
+  ),
+  BigwigMinus = c(
+    paste0("./bw_files/col0_rep", c(1:3), ".reverse.expanded.bw")
+  )
+)
+rownames(col0_metadata) <- col0_metadata$Name
+col0_metadata
+
+bw_plus <- BigWigFileList(col0_metadata$BigwigPlus)
+bw_minus <- BigWigFileList(col0_metadata$BigwigMinus)
+names(bw_plus) <- col0_metadata$Name
+names(bw_minus) <- col0_metadata$Name
+
+col0_CTSSs <- quantifyCTSSs(plusStrand=bw_plus,
+                       minusStrand=bw_minus,
+                       design=col0_metadata,
+                       genome=genomeInfo)
+
+col0_CTSSs <- col0_CTSSs[,-2]
+
+col0_CTSSs <- calcSupport(col0_CTSSs, inputAssay='counts', outputColumn='CTSS_support', unexpressed=0)
+col0_CTSSs <- subset(col0_CTSSs, CTSS_support >= 2)
+
+col0_CTSSs <- calcTPM(col0_CTSSs, inputAssay='counts', outputAssay='TPM', outputColumn='totalTags')
+col0_CTSSs <- calcSupport(col0_CTSSs, inputAssay='TPM', outputColumn='TPM_support', unexpressed=0)
+
+col0_CTSSs <- calcPooled(col0_CTSSs, inputAssay='TPM', outputColumn='pooled_TPM')
+score(rowRanges(col0_CTSSs)) <- rowRanges(col0_CTSSs)$pooled_TPM
+
+
+col0_TCs <- clusterUnidirectionally(col0_CTSSs, mergeDist = 20)
+
+# Quantify TCs with CTSS counts
+col0_TCs <- quantifyClusters(col0_CTSSs, clusters=col0_TCs, inputAssay='counts', sparse=F)
+
+# Calculate TPM from CTSS counts
+col0_TCs <- calcTPM(col0_TCs, totalTags='totalTags', inputAssay='counts', outputAssay='TPM')
+
+# Calculate TPM support for each genotype
+col0_TCs <- calcSupport(col0_TCs, inputAssay='TPM', outputColumn='TPM_support_col0', unexpressed=1)
+# Keep only TCs with a minimum of 1 TPM in at least 3 samples (min group size)
+col0_TCs <- subset(col0_TCs, TPM_support_col0 >= 2)
+
+## Minu TCs
+setwd("~/TFM/Strip-seqBigwigs")
+minu_metadata = data.frame(
+  Name = c(paste0("minu_rep", c(1:3))),
+  Condition = c(rep("minu", 3)),
+  Replicate = rep(c(1, 2, 3)),
+  BigwigPlus = c(
+    paste0("./bw_files/minu_rep", c(1:3), ".forward.expanded.bw")
+  ),
+  BigwigMinus = c(
+    paste0("./bw_files/minu_rep", c(1:3), ".reverse.expanded.bw")
+  )
+)
+rownames(minu_metadata) <- minu_metadata$Name
+minu_metadata
+
+bw_plus <- BigWigFileList(minu_metadata$BigwigPlus)
+bw_minus <- BigWigFileList(minu_metadata$BigwigMinus)
+names(bw_plus) <- minu_metadata$Name
+names(bw_minus) <- minu_metadata$Name
+
+minu_CTSSs <- quantifyCTSSs(plusStrand=bw_plus,
+                       minusStrand=bw_minus,
+                       design=minu_metadata,
+                       genome=genomeInfo)
+
+minu_CTSSs <- minu_CTSSs[, -1]
+
+minu_CTSSs <- calcSupport(minu_CTSSs, inputAssay='counts', outputColumn='CTSS_support', unexpressed=0)
+minu_CTSSs <- subset(minu_CTSSs, CTSS_support >= 2)
+
+minu_CTSSs <- calcTPM(minu_CTSSs, inputAssay='counts', outputAssay='TPM', outputColumn='totalTags')
+minu_CTSSs <- calcSupport(minu_CTSSs, inputAssay='TPM', outputColumn='TPM_support', unexpressed=0)
+
+minu_CTSSs <- calcPooled(minu_CTSSs, inputAssay='TPM', outputColumn='pooled_TPM')
+score(rowRanges(minu_CTSSs)) <- rowRanges(minu_CTSSs)$pooled_TPM
+
+minu_TCs <- clusterUnidirectionally(minu_CTSSs, mergeDist = 20)
+
+# Quantify TCs with CTSS counts
+minu_TCs <- quantifyClusters(minu_CTSSs, clusters=minu_TCs, inputAssay='counts', sparse=F)
+
+# Calculate TPM from CTSS counts
+minu_TCs <- calcTPM(minu_TCs, totalTags='totalTags', inputAssay='counts', outputAssay='TPM')
+
+# Calculate TPM support for each genotype
+minu_TCs <- calcSupport(minu_TCs, inputAssay='TPM', outputColumn='TPM_support_minu', unexpressed=1)
+# Keep only TCs with a minimum of 1 TPM in at least 3 samples (min group size)
+minu_TCs <- subset(minu_TCs, TPM_support_minu >= 2)
+```
+
+&nbsp;
+
+## Stripe DATA
+```{r Data loading, message=FALSE, warning=FALSE, eval=TRUE}
+# Generate the dataset
+metadata = data.frame(
+  Name = c(paste0("col0_rep", c(1:3)), paste0("minu_rep", c(1:3))),
+  Condition = c(rep("col0", 3), rep("minu", 3)),
+  Replicate = rep(c(1, 2, 3), 2),
+  BigwigPlus = c(
+    paste0("./bw_files/col0_rep", c(1:3), ".forward.expanded.bw"),
+    paste0("./bw_files/minu_rep", c(1:3), ".forward.expanded.bw")
+  ),
+  BigwigMinus = c(
+    paste0("./bw_files/col0_rep", c(1:3), ".reverse.expanded.bw"),
+    paste0("./bw_files/minu_rep", c(1:3), ".reverse.expanded.bw")
+  )
+)
+rownames(metadata) <- metadata$Name
+metadata
+
+## Subsample to reduce background # Discard samples col0_rep2 and minu_rep3
+selected_samples <- which(metadata$Name != "col0_rep2" & metadata$Name != "minu_rep1")
+metadata <- metadata[selected_samples,]
+
+bw_plus <- BigWigFileList(metadata$BigwigPlus)
+bw_minus <- BigWigFileList(metadata$BigwigMinus)
+names(bw_plus) <- metadata$Name
+names(bw_minus) <- metadata$Name
+
+genome <- read.table("./annotation/TAIR10.chr_sizes")
+colnames(genome) <- c("seqnames", "seqlengths")
+genome$isCircular <- c(rep(FALSE, 5), rep(TRUE, 2))
+
+genomeInfo <- Seqinfo(genome$seqnames, genome$seqlengths, genome$isCircular, "TAIR10")
+genomeInfo
+
+# Annotation variables
+prom_cats <-c("promoter","fiveUTR","intergenic")
+bsg <- BSgenome.Athaliana.TAIR.TAIR9
+bsg@seqinfo@genome<-c("TAIR10", "TAIR10", "TAIR10", "TAIR10", "TAIR10", "TAIR10", "TAIR10")
+odb <- org.At.tair.db
+# Generate the txdb object from GTF file
+#txdb <- makeTxDbFromGFF("./annotation/Araport11_GTF_genes.clean.gtf", format = "gtf")
+txdb <- makeTxDbFromGFF("./annotation/TAIR10_GFF3_genes.gff", format = "gff")
+```
+
+&nbsp;
+
+# TSS CALLING
+```{r TSS screening, message=FALSE, warning=FALSE, eval=TRUE}
+CTSSs <- quantifyCTSSs(plusStrand=bw_plus,
+                       minusStrand=bw_minus,
+                       design=metadata,
+                       genome=genomeInfo)
+
+
+CTSSs <- calcSupport(CTSSs, inputAssay='counts', outputColumn='CTSS_support', unexpressed=0)
+CTSSs <- subset(CTSSs, CTSS_support >= 2)
+
+CTSSs <- calcTPM(CTSSs, inputAssay='counts', outputAssay='TPM', outputColumn='totalTags')
+CTSSs <- calcSupport(CTSSs, inputAssay='TPM', outputColumn='TPM_support', unexpressed=0)
+
+CTSSs <- calcPooled(CTSSs, inputAssay='TPM', outputColumn='pooled_TPM')
+score(rowRanges(CTSSs)) <- rowRanges(CTSSs)$pooled_TPM
+
+TCs <- clusterUnidirectionally(CTSSs, mergeDist = 20)
+
+hist(width(TCs), breaks = 100)
+
+# Quantify TCs with CTSS counts
+TCs <- quantifyClusters(CTSSs, clusters=TCs, inputAssay='counts', sparse=F)
+
+# Calculate TPM from CTSS counts
+TCs <- calcTPM(TCs, totalTags='totalTags', inputAssay='counts', outputAssay='TPM')
+
+# Calculate TPM support for each genotype
+col0_TCs <- calcSupport(TCs[,1:2], inputAssay='TPM', outputColumn='TPM_support_col0', unexpressed=1)
+minu_TCs <- calcSupport(TCs[,3:4], inputAssay='TPM', outputColumn='TPM_support_minu', unexpressed=1)
+global_TCs <- calcSupport(TCs,inputAssay = 'TPM', outputColumn = 'global_support', unexpressed = 1)
+# Bind support columns to TCs object
+mcols(rowRanges(TCs))$TPM_support_col0 <- rowRanges(col0_TCs)$TPM_support_col0
+mcols(rowRanges(TCs))$TPM_support_minu <- rowRanges(minu_TCs)$TPM_support_minu
+mcols(rowRanges(TCs))$Global_support <- rowRanges(global_TCs)$global_support
+# Rename the TPM columns as score columns for the next steps
+names(TCs@rowRanges@elementMetadata@listData) <- c("score","thick","col0_support","minu_support", "global_support")
+# Keep only TCs with a minimum of 1 TPM in at least 2 samples (min group size)
+TCs <- subset(TCs, col0_support >= 2 | minu_support >= 2)
+# Rebrand the TCs for later porposes
+names(TCs) <- paste0("minu_col0_TC_", c(1:length(TCs)))
+```
+
+&nbsp;
+
+## ANNOTATION
+```{r Gene annotation,message=FALSE,warning=FALSE, eval=TRUE}
+# Annotate with transcript IDs
+TCs <- assignTxID(TCs, txModels = txdb, swap="thick", upstream = 400, downstream = 0)
+# Annotate with transcript context
+TCs <- assignTxType(TCs, txModels = txdb, swap="thick")
+# Gene symbols
+TCs <- assignGeneID(TCs, geneModels=txdb, outputColumn='geneID', upstream=400, downstream=-0, swap='thick')
+symbols <- mapIds(odb, keys=rowRanges(TCs)$geneID, keytype='TAIR', column='SYMBOL')
+rowRanges(TCs)$symbol <- as.character(symbols)
+# Quantify expression at Gene-level
+genelevel <- quantifyGenes(TCs, genes='geneID', inputAssay='counts')
+genelevel <- calcTPM(genelevel, inputAssay='counts', outputAssay='TPM')
+# Location and expression of TSSs
+cluster_info <- TCs %>%
+  rowData() %>%
+  as.data.frame()
+# Number of clusters
+ggplot(cluster_info, aes(x=txType, 
+                         fill=txType)) +
+  geom_bar(alpha=0.75, position="dodge", color="black") +
+  scale_fill_colorblind("Cluster type") +
+  labs(x="Cluster annotation", y="Frequency") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+# Expression of clusters
+ggplot(cluster_info, aes(x=txType,
+                         y=log2(score/ncol(TCs)),
+                         fill=txType)) +
+  geom_violin(alpha=0.75, draw_quantiles = c(0.25, 0.50, 0.75)) +
+  scale_fill_colorblind("Cluster type") +
+  labs(x="Cluster annotation", y="log2(TPM)") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+&nbsp;
+
+# TSS CLUSTER SHAPE STATISTICS (Optional)
+```{r Cluster shape, message=FALSE, warning=FALSE, eval=TRUE}
+#Set the score column for temporarily use
+score(rowRanges(CTSSs)) <- rowRanges(CTSSs)$pooled_TPM
+# Calculate shape statistics
+TCs <- calcShape(TCs, pooled=CTSSs, outputColumn='shape_IQR', shapeFunction=shapeIQR, lower=0.1, upper=0.9)
+TCs <- calcShape(TCs, pooled=CTSSs, outputColumn='shape_entropy', shapeFunction=shapeEntropy)
+TCs <- calcShape(TCs, pooled=CTSSs, outputColumn='shape_mean', shapeFunction=shapeMean)
+
+# Remove tmp column
+score(rowRanges(CTSSs)) <- NULL
+
+# Plot the distribution of IQR
+hist(rowRanges(TCs)$shape_IQR,
+     breaks=max(rowRanges(TCs)$shape_IQR),
+     xlim=c(0,100), 
+     xlab = "IQR", 
+     col="blue")
+
+# Plot of the bimodal distribution
+TCs %>%
+  rowData %>%
+  as.data.frame %>%
+  ggplot(aes(x=shape_IQR)) + geom_histogram(binwidth=1, fill="hotpink", alpha=0.75)+
+  geom_vline(xintercept =10 , linetype="dashed", alpha=0.75, color="black") +
+  facet_zoom(xlim = c(0,100)) +
+  labs(x="10-90% IQR", y="Frequency")
+TCs %>%
+  rowData %>%
+  as.data.frame %>%
+  ggplot(aes(x=shape_IQR)) + geom_histogram(binwidth=1, fill="hotpink", alpha=0.75)+
+  geom_vline(xintercept =6, linetype="dashed", alpha=0.75, color="black") +
+  facet_zoom(xlim = c(0,100)) +
+  labs(x="10-90% IQR", y="Frequency")
+TCs %>%
+  rowData %>%
+  as.data.frame %>%
+  ggplot(aes(x=shape_IQR)) + geom_histogram(binwidth=1, fill="hotpink", alpha=0.75)+
+  geom_vline(xintercept =4 , linetype="dashed", alpha=0.75, color="black") +
+  facet_zoom(xlim = c(0,100)) +
+  labs(x="10-90% IQR", y="Frequency")
+# Divide into groups
+rowData(TCs)$shape <- ifelse(rowData(TCs)$shape_IQR < 4 , "Sharp", "Broad")
+# Count group sizes
+table(rowData(TCs)$shape)
+```
+
+&nbsp;
+
+# DATA SAVING
+```{r Data saving, message=FALSE, warning=FALSE, eval=TRUE}
+# Export the TCs as bedfiles and rds objects
+
+## Minu files
+export.bed(rowRanges(minu_TCs),"./bedfiles/minu_TCs.bed")
+export.bed(rowRanges(minu_CTSSs), "./bedfiles/minu_CTSSs.bed")
+saveRDS(minu_TCs, "./TSS_calling/minu_TCs.rds")
+saveRDS(minu_CTSSs, "./TSS_calling/minu_CTSSs.rds")
+## Col0 files
+export.bed(rowRanges(col0_TCs),"./bedfiles/col0_TCs.bed")
+export.bed(rowRanges(col0_CTSSs), "./bedfiles/col0_CTSSs.bed")
+saveRDS(col0_TCs, "./TSS_calling/col0_TCs.rds")
+saveRDS(col0_CTSSs, "./TSS_calling/col0_CTSSs.rds")
+
+## Combined data
+export.bed(rowRanges(TCs),"./bedfiles/TCs_20bp.bed")
+export.bed(rowRanges(CTSSs), "./bedfiles/CTSSs.bed")
+saveRDS(TCs, "./TSS_calling/TCs.rds")
+saveRDS(CTSSs, "./TSS_calling/CTSSs.rds")
+```

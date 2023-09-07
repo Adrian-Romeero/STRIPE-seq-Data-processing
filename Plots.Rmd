@@ -1,0 +1,613 @@
+---
+title: "Plots"
+author: "Adrián Romero Casiano"
+date: '2023-06-09'
+output: html_document
+---
+
+# Packages
+```{r Packages, results='hide', warning=FALSE,message=FALSE, eval=TRUE}
+library(tidyverse)
+library(tidylog)
+library(magrittr)
+library(stringr)
+library(reshape2)
+library(CAGEfightR)
+library(GenomicFeatures)
+library(RColorBrewer)
+library(BSgenome.Athaliana.TAIR.TAIR9)
+library(org.At.tair.db)
+library(ggplot2)
+library(ggforce)
+library(ggthemes)
+library(DT)
+library(corrplot)
+library(eulerr)
+library(PCAtools)
+library(DESeq2)
+library(pheatmap)
+```
+
+
+## Data loading
+```{r Data loading, message=FALSE,warning=FALSE, eval=TRUE}
+# DRIMSEQ data
+transcript_result <- readRDS("./DRIMSEQ_Models/transcript_result20bp.rds")
+stage_sig_results <- readRDS("./DRIMSEQ_Models/stageR_sig_results.rds")
+gene_result <- readRDS("./DRIMSEQ_Models/gene_result20bp.rds")
+# DEXseq data
+dexseq_results <- readRDS("./DEXSEQ_Models/20bp_gb_2rep_dexseq_object.rds")
+dex_seq_sig_results <- readRDS("./DEXSEQ_Models/dexseq_sig_results.rds")
+# DESeq2 data
+deseq2_genelvl <- readRDS("./DESeq2/deseq2_genelvl_results.rds")
+deseq2_genelvl_sig <- readRDS("./DESeq2/deseq2_genelvl_sig_results.rds")
+# RNAseq data
+rna_degs <- read.table("./RNA-seq data/RNA_DEGs.csv", sep = ";", header = TRUE, dec = ",") %>%
+  filter(minu_padj < 0.05) %>%
+  filter(abs(minu_log2FoldChange) >= log2(1.5))
+# TSS data
+TCs <- readRDS("./TSS_calling/TCs.rds")
+TCs_df <- data.frame(rowRanges(TCs))
+TCs_df$feature_id <- names(rowRanges(TCs))
+counts <- data.frame(TCs@assays@data@listData[["counts"]])
+counts$feature_id <- TCs_df$feature_id
+col0_counts <- counts[1:2]
+minu_counts <- counts[3:4]
+col0_counts_sum <- data.frame(rowSums(col0_counts))
+minu_counts_sum <- data.frame(rowSums(minu_counts))
+counts$col0_sum <- col0_counts_sum[,1]
+counts$minu_sum <- minu_counts_sum[,1]
+counts$feature_id <- names(TCs)
+# Anno data
+txdb <- makeTxDbFromGFF("./annotation/TAIR10_GFF3_genes.gff", format = "gff")
+prom_cats <-c("promoter","fiveUTR","intergenic")
+tair10_genes <-genes(txdb)
+tss_cords <- data.frame(ranges(tair10_genes), strand(tair10_genes))
+tss_cords$tss <- if_else(tss_cords$strand.tair10_genes. == "+",
+                         true = tss_cords$start,
+                         false = tss_cords$end)
+TCs_df <- merge(TCs_df, tss_cords[,4:6], by.x = "geneID", by.y = "names")
+TCs_df$dist_tair10 <- if_else(TCs_df$strand =="+",
+                              true = TCs_df$thick.start - TCs_df$tss,
+                              false = TCs_df$tss - TCs_df$thick.start)
+# Color palette
+colors = RColorBrewer::brewer.pal(9, "Dark2")
+```
+&nbsp;
+
+##  Analysis of sample correlation
+```{r DE analysis, message=FALSE, warning=FALSE,eval=TRUE}
+# Create DESeq2 object with blank design
+# Count matrix without TPM normalization
+counts <- data.frame(TCs@assays@data@listData[["counts"]])
+metadata <- as.data.frame(colData(TCs)[,1:3])
+
+dds_blind <- DESeqDataSetFromMatrix((as.matrix(counts)), 
+                                    metadata, ~Condition)
+# Normalize and log transform
+vst_blind <- vst(dds_blind, blind = TRUE)
+
+# Check the variability of the samples
+svg("./overlaps/PCA.svg")
+pca_res <- PCAtools::pca(assay(vst_blind), metadata = metadata)
+biplot(pca_res, labSize = 5, pointSize = 5, sizeLoadingsNames = 5,colby = "Condition",
+       colkey = colors[c(1,2)])
+dev.off()
+
+# Correlation plot
+# Generate correlation matrices
+m_cor <- cor(assay(vst_blind), method = "pearson")
+colorlist <- colorRampPalette(colors = rev(brewer.pal(7, "RdBu")))(255)
+
+svg("./matriz_correlacion.svg")
+pheatmap(m_cor, color = colorlist, display_numbers = T, number_color = "black", fontsize = 16)
+dev.off()
+print(m_cor)
+```
+
+&nbsp;
+## Generate bedfile with WT-TSS & Minu-TSS and filtering by dist to TAIR10 TSS
+```{r Plots 4, message=FALSE,warning=FALSE,eval=TRUE}
+# Add the feature_id column to the rowRanges object and create a data frame
+sig_TSS <- read.table("./stripe_sort_lister.txt", header = TRUE, sep  ="\t")
+sig_TSS <- merge(sig_TSS[,c(1,2,6,13)], TCs_df[,-16], by = "feature_id")
+# Generate a data.frame with the TAIR10 tss cords
+tair10_genes <-genes(txdb)
+tss_cords <- data.frame(ranges(tair10_genes), strand(tair10_genes))
+tss_cords$tss <- if_else(tss_cords$strand.tair10_genes. == "+",
+                         true = tss_cords$start,
+                         false = tss_cords$end)
+sig_TSS <- merge(sig_TSS, tss_cords[,c(4,6)], by.x="gene_id", by.y = "names")
+sig_TSS$dist_tair10 <- if_else(sig_TSS$strand =="+",
+                              true = sig_TSS$thick.start - sig_TSS$tss,
+                              false = sig_TSS$tss - sig_TSS$thick.start)
+
+# Get the coordinates of the up-regulated clusters
+sig_TSS$thick.end <-if_else(sig_TSS$strand == "+",
+                               true = sig_TSS$thick.start + 1,
+                               false = sig_TSS$thick.start)
+
+sig_TSS$thick.start <- if_else(sig_TSS$strand == "+",
+                            true = sig_TSS$thick.start,
+                            false = sig_TSS$thick.start - 1)
+
+
+# Pair the minu up-regulated with their WT most expressed equivalent 
+# Filter the table and get the cluster in WT with the highest expression for each gene
+TCs_df <- merge(TCs_df, tss_cords[,4:6], by.x = "geneID", by.y = "names")
+TCs_df$dist_tair10 <- if_else(TCs_df$strand =="+",
+                              true = TCs_df$thick.start - TCs_df$tss,
+                              false = TCs_df$tss - TCs_df$thick.start)
+TCs_sig_genes <- TCs_df %>%
+  merge(counts[5:7], by = "feature_id")  %>%
+  filter(geneID %in% sig_TSS$gene_id) %>%
+  arrange(desc(col0_sum)) %>%
+  filter(dist_tair10 > -500 & dist_tair10 < 500) %>%
+  group_by(geneID) %>%
+  filter(row_number()==1)
+# Create a table with the cluster with the highest expression for each gene in both genotypes
+dif_tcs <- merge(TCs_sig_genes[,c(1,2,3,7,9,10)], sig_TSS[,c(1,2,5,11,12,22)], by.x = "geneID", by.y = "gene_id")
+
+colnames(dif_tcs)<- c("gene_id", "WT_cluster", "WT_Chr","strand", "WT_thick", "WT_thick.end","minu_cluster","minu_Chr","minu_thick", "minu_thick.end", "dist_TAIR10")
+
+# Transform the thick start and end positions based on strand
+dif_tcs$WT_thick.end <-if_else(dif_tcs$strand == "+",
+                               true = dif_tcs$WT_thick + 1,
+                               false = dif_tcs$WT_thick)
+
+dif_tcs$WT_thick <- if_else(dif_tcs$strand == "+",
+                            true = dif_tcs$WT_thick,
+                            false = dif_tcs$WT_thick - 1)
+
+# Calculate the distance between the WT and minu clusters
+dif_tcs$dist <- if_else(dif_tcs$strand == "+", 
+                        true = dif_tcs$WT_thick - dif_tcs$minu_thick, 
+                        false = dif_tcs$minu_thick - dif_tcs$WT_thick)
+dif_tcs <- dif_tcs[dif_tcs$dist > 50,]
+
+# Generate the table with  both minu and col0 TSS
+write.table(dif_tcs, "./minu_col_TSS_sigV2.txt", sep = "\t", col.names = TRUE, row.names = FALSE, quote = FALSE)
+dif_tcs <- arrange(dif_tcs, desc(dist))
+# Add an empty score column 
+dif_tcs$score <- "."
+# Generate the WT bedfile
+write.table(dif_tcs[,c(3,5,6,2,12,4,11)], "./bedfiles/WT_sig_clusters_V2.bed", sep = "\t", col.names = FALSE, row.names = FALSE, quote = FALSE)
+```
+
+&nbsp;
+
+## Generate bedfile with +1 nuc dist
+```{r Plots 5, message=FALSE,warning=FALSE,eval=TRUE}
+plus_one_shift <- read_delim("./bedfiles/mnase/plus_one_all_byshift.bed", delim = "\t", col_names = FALSE)
+colnames(plus_one_shift) <- c("Chr","start","end","name","score","strand","gene_id","dist_tpf","dist_minu")
+plus_one_shift$dist_minu <- plus_one_shift$dist_minu  * -1
+plus_one_shift$dist_tpf <- plus_one_shift$dist_tpf * -1
+
+minu_up <-merge(dif_tcs[,c(1,3,5,6,2,12,4,11)], plus_one_shift[,c(7:9)], by = "gene_id") %>%
+  arrange(desc(dist_minu))
+
+
+ggplot(minu_up, aes(minu_up$dist, minu_up$dist_minu)) +
+  geom_point() +
+  labs(x = "TSS minu - TSS WT", y = "Nuc minu - Nuc WT", title = "Stripe-seq/Mnase-seq Distance to TSS correlation") +
+  theme_minimal()
+
+# Generate 5 groups of genes with similar distance between WT-TSS & minu-TSS
+minu_up <- arrange(minu_up, desc(dist))
+n <- round(length(minu_up$dist)/5)
+cluster_1 <- top_n(minu_up, n, dist)
+minu_up <- subset(minu_up, minu_up$dist != cluster_1$dist)
+cluster_2 <- top_n(minu_up, n, dist)
+minu_up <- subset(minu_up, minu_up$dist != cluster_2$dist)
+cluster_3 <- top_n(minu_up, n, dist)
+minu_up <- subset(minu_up, minu_up$dist != cluster_3$dist)
+cluster_4 <- top_n(minu_up, n, dist)
+cluster_5 <- subset(minu_up, minu_up$dist != cluster_4$dist)
+# Generate the bdefiles
+write.table(cluster_1[,c(2:8,1,9:10)],"./bedfiles/dist_clustered/cluster_1.bed", sep = "\t", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(cluster_2[,c(2:8,1,9:10)],"./bedfiles/dist_clustered/cluster_2.bed", sep = "\t", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(cluster_3[,c(2:8,1,9:10)],"./bedfiles/dist_clustered/cluster_3.bed", sep = "\t", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(cluster_4[,c(2:8,1,9:10)],"./bedfiles/dist_clustered/cluster_4.bed", sep = "\t", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(cluster_5[,c(2:8,1,9:10)],"./bedfiles/dist_clustered/cluster_5.bed", sep = "\t", quote = FALSE, col.names = FALSE, row.names = FALSE)
+
+#Clustering approach based on k-means method
+gene_clusters <- kmeans(minu_up$dist, centers = 5, iter.max = 100, nstart = 5)
+minu_up$gene_cluster <- gene_clusters$cluster
+#Clustering approach based on sample distribution
+summary(minu_up$dist)
+minu_up$gene_cluster <- "*"
+minu_up[minu_up$dist <= 46,]$gene_cluster <- "cluster_1" 
+minu_up[minu_up$dist >= 83,]$gene_cluster <- "cluster_2"
+minu_up[minu_up$dist > 46 & minu_up$dist < 62,]$gene_cluster <- "cluster_3"
+minu_up[minu_up$dist > 61 & minu_up$dist < 83,]$gene_cluster <- "cluster_4"
+
+```
+&nbsp;
+
+# Plot differences in nuc shift between sig and non sig clusters 
+```{r Plots 6, message=FALSE, warning=FALSE,eval=TRUE}
+### Calcular el solapamiento entre los genes con uso diferencial de TCs y los genes diana de minu ###
+minu_targets <- read.table("./bedfiles/mnase/TPF.inter_targets.bed")
+colnames(minu_targets) <- c("Chr","start", "end", "gene_id", "score", "strand")
+drimseq_genes <- data.frame(unique(stage_sig_results$gene_id))
+colnames(drimseq_genes) <- "gene_id"
+svg("./overlaps/minu_targets_diff_TCs.svg", height = 4, width = 4)
+plot(euler(list(STRIPE = drimseq_genes$gene_id, DIANAS_minu = minu_targets$gene_id )),
+     fill = NA, edge = colors[c(1,3)],quantities = TRUE, main ="Genes con TC diferencial y diana de minu", labels = FALSE)
+dev.off()
+
+# Seleccionar los genes en comun de los TCs diferenciales y las dianas de minu
+minu_targets_sig_tcs <- merge(minu_targets, drimseq_genes, by = "gene_id")
+
+write.table(minu_targets_sig_tcs[,c(2,3,4,1,5,6)], "./bedfiles/mnase/minu_targets_tc_shift.bed",
+            col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
+# Seleccionar los genes dianas de minu sin TCs diferencial
+a <- is.na(match(minu_targets$gene_id,minu_targets_sig_tcs$gene_id))
+minu_targets_non_sig <- minu_targets[a,]
+write.table(minu_targets_non_sig, "./bedfiles/mnase/minu_targets_tc_noshift.bed",
+            col.names = FALSE, row.names = FALSE, quote = FALSE, sep = "\t")
+
+```
+
+&nbsp;
+
+# PLot promoter sequences of TSS
+```{r}
+# Minu dataset
+motif_files <- list.files(path = "./motif_analysis/MEME/fimo/minu", full.names = TRUE, recursive = TRUE, pattern = ".tsv")
+minu_all <- data.frame()
+# Add the cluster_id and motif start to the dataset
+for (i in motif_files) {
+  minu_proms_id <- read.table(i, header = TRUE)
+  minu_proms_id$feature_id <- str_extract(minu_proms_id[,"sequence_name"], pattern = "^minu_col0_TC_([0-9]*)" )
+  minu_proms_id$Chr <- str_extract(minu_proms_id[,"sequence_name"], pattern = "Chr[12345CM]")
+  minu_proms_id$strand <- str_extract(minu_proms_id[,"sequence_name"], pattern = "\\([+-]\\)") %>%
+    str_extract(pattern = "[+-]")
+  minu_proms_id$seq_start <- str_extract(minu_proms_id[,"sequence_name"], pattern = ":[0-9]*-") %>%
+    str_extract(pattern = "[0-9]+") %>% as.integer()
+  minu_proms_id$motif_start <- minu_proms_id$seq_start + (minu_proms_id$start -1)
+  minu_proms_id$motif_end <- minu_proms_id$seq_start + (minu_proms_id$stop -1)
+  minu_proms_id <- merge(minu_proms_id, TCs_df[,c(8,18:20)], by = "feature_id")
+  # Scale the motif center to the 50 +/- bp expanded
+  minu_proms_id$motif_center <- round((minu_proms_id$motif_start + minu_proms_id$motif_end) / 2)
+  minu_proms_id$motif_dist_tss <- minu_proms_id$motif_center - minu_proms_id$tss
+  minu_proms_id$motif_dist_tss <- if_else(minu_proms_id$strand == "+",
+                                 true = minu_proms_id$motif_center - minu_proms_id$tss,
+                                 false = -1*(minu_proms_id$tss - minu_proms_id$motif_center))
+  minu_proms_id$genotype <- "Minu"
+  minu_all <- rbind(minu_all, minu_proms_id)
+}
+#Col0 dataset
+motif_files <- list.files(path = "./motif_analysis/MEME/fimo/WT", full.names = TRUE, recursive = TRUE, pattern = ".tsv")
+col0_all <- data.frame()
+# Save all the motifs for WT genotype in one table
+for (i in motif_files) {
+  col0_proms_id <- read.table(i, header = TRUE)
+  col0_proms_id$feature_id <- str_extract(col0_proms_id[,"sequence_name"], pattern = "^minu_col0_TC_([0-9]*)" )
+  col0_proms_id$Chr <- str_extract(col0_proms_id[,"sequence_name"], pattern = "Chr[12345CM]")
+  col0_proms_id$strand <- str_extract(col0_proms_id[,"sequence_name"], pattern = "\\([+-]\\)") %>%
+    str_extract(pattern = "[+-]")
+  col0_proms_id$seq_start <- str_extract(col0_proms_id[,"sequence_name"], pattern = ":[0-9]*-") %>%
+    str_extract(pattern = "[0-9]+") %>% as.integer()
+  col0_proms_id$motif_start <- col0_proms_id$seq_start + (col0_proms_id$start -1)
+  col0_proms_id$motif_end <- col0_proms_id$seq_start + (col0_proms_id$stop -1)
+  col0_proms_id <- merge(col0_proms_id, TCs_df[,c(8,18:20)], by = "feature_id")
+  # Scale the motif center to the 50 +/- bp expanded
+  col0_proms_id$motif_center <- round((col0_proms_id$motif_start + col0_proms_id$motif_end) / 2)
+  col0_proms_id$motif_dist_tss <- col0_proms_id$motif_center - col0_proms_id$tss
+  col0_proms_id$motif_dist_tss <- if_else(col0_proms_id$strand == "+",
+                               true = col0_proms_id$motif_center - col0_proms_id$tss,
+                               false = -1*(col0_proms_id$tss - col0_proms_id$motif_center))
+  col0_proms_id$genotype <- "Col0"
+  col0_all <- rbind(col0_all, col0_proms_id)
+  }
+
+
+# Gather both genotypes in a table to plot the results for each motif
+whole_clusters <- rbind(col0_all, minu_all)
+
+whole_clusters$thick.end <- if_else(whole_clusters$strand == "+",
+                                    true = whole_clusters$thick.start + 1,
+                                    false = whole_clusters$thick.start)
+
+whole_clusters$thick.start <- if_else(whole_clusters$strand == "+",
+                                      true = whole_clusters$thick.start,
+                                      false = whole_clusters$thick.start)
+# Generate panel with all the plots of all motifs
+whole_clusters %>% ggplot(aes(x = motif_dist_tss, y = ..density.., color= genotype)) + geom_density() + coord_cartesian(xlim = c(-100,100), clip = "on")+ facet_wrap(~motif_alt_id) + scale_color_brewer(palette = "Dark2") +
+  xlab("Distancia al TSS") + ylab("Densidad") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        panel.spacing = unit(2, "lines"),
+        text = element_text(size = 16))
+  ggsave("./metaplots_y_heatmaps/50bp_up_whole_prom_motifs.png")
+  
+
+# Iterate to save a single plot for each motif
+#motifs <- unique(whole_clusters$motif_alt_id)
+#for(i in motifs) {
+ # sample <- subset(whole_clusters, motif_alt_id==i)
+  #sample %>%
+  #  ggplot(aes(x = motif_dist_tss, y = ..density.., color= genotype)) + geom_density() + coord_cartesian(xlim = c(-100,100), clip = "on") + ggtitle(label = i)
+   # ggsave(paste0("./metaplots_y_heatmaps/promoter_motifs_V2/", i, ".png"))
+#}
+```
+
+&nbsp;
+
+## Overlap between RNA DEGs and STRIPE DEGs
+```{r Plots 8, message=FALSE, warning=FALSE, eval=TRUE}
+# Load the Stripe-seq DEG List obtained from stageR
+stripe_degs <- stage_sig_results
+# Calculate the log2FC for each gene
+stripe_degs$log2FC <- log2((stripe_degs$minu_sum +1) / (stripe_degs$col0_sum +1))
+# These list contains repeated genes, for further analysis we only use the most significant sample of each gene in the list
+stripe_degs <- stripe_degs %>%
+  arrange(log2FC) %>%
+  group_by(gene_id) %>%
+  filter(row_number()==1)
+# Load the Stripe-seq DEG list obtained from DRIMSEQ results
+gene_result %>%
+  filter(adj_pvalue < 0.05) %>%
+  distinct(gene_id)
+
+# Generate the overlaps between DRIMSEQ and DEXSEQ
+
+#Pre stageR test
+drimseq_sig <- transcript_result %>%
+  filter(adj_pvalue < 0.05)
+dexseq_sig <- data.frame(DEXSeqResults(dexseq_results, independentFiltering=TRUE)) %>%
+  filter(padj < 0.05)
+# TSS overlap
+svg("./overlaps/drimseq_dexseq_pre_stage_tss.svg", height = 4, width = 4)
+plot(euler(list(DRIMSEQ = drimseq_sig$feature_id, DEXSEQ = dexseq_sig$featureID )),
+     fill = NA, edge = colors[c(5,6)],quantities = TRUE, main ="TCs", labels = FALSE)
+dev.off()
+# Gene overlap
+dexseq_sig <- distinct(dexseq_sig, groupID)
+drimseq_sig <- distinct(drimseq_sig, gene_id)
+svg("./overlaps/drimseq_dexseq_pre_stage_gene.svg", height = 4, width = 4)
+plot(euler(list(DRIMSEQ = drimseq_sig$gene_id, DEXSEQ = dexseq_sig$groupID )), 
+           fill = NA, edge = colors[c(5,6)],quantities = TRUE, main ="Genes", labels = FALSE)
+dev.off()
+# Post stageR test
+# TSS overlap
+svg("./overlaps/drimseq_dexseq_post_stage_tss.svg", height = 4, width = 4)
+plot(euler(list(DRIMSEQ = stage_sig_results$feature_id, DEXSEQ = dex_seq_sig_results$feature_id )), 
+           fill = NA, edge = colors[c(5,6)],quantities = TRUE, main ="TCs", labels = FALSE)
+dev.off()
+# Gene overlap
+dexseq_sig <- distinct(dex_seq_sig_results, gene_id)
+drimseq_sig <- distinct(stage_sig_results, gene_id)
+svg("./overlaps/drimseq_dexseq_post_stage_gene.svg", height = 4, width = 4)
+plot(euler(list(DRIMSEQ = drimseq_sig$gene_id, DEXSEQ = dexseq_sig$gene_id )), 
+           fill = NA, edge = colors[c(5,6)],quantities = TRUE, main ="Genes", labels = FALSE)
+dev.off()
+# Generate the overlaps between Stripe and RNA data
+# Overlap RNA/DESeq2
+svg("./overlaps/deseq2_rna.svg", height = 4, width = 4)
+plot(venn(list("RNA-seq" = rna_degs$TAIR, "STRIPE-seq" = deseq2_genelvl_sig$gene_id)), 
+           fill = NA, edge = colors[c(5,6)],quantities = TRUE, main ="Genes", labels = FALSE)
+dev.off()
+# Overlap RNA/stageR
+svg("./overlaps/drim_seq_rna.svg", height = 4, width = 4)
+plot(euler(list(RNA = rna_degs$TAIR, DRIMSEQ = stripe_degs$gene_id)))
+dev.off()
+
+# Generate the lists of gene overlaps
+rna_stripe <- rna_degs[is_in(rna_degs$TAIR,stripe_degs$gene_id),]
+rna_drimseq <- rna_degs[is_in(rna_degs$TAIR,gene_result$gene_id),]
+write.table(rna_stripe[,1], file = "./overlap_RNA_stageR.txt", quote = FALSE, col.names = FALSE, row.names = FALSE)
+write.table(rna_drimseq[,1], file = "./overlap_RNA_DRIMSEQ.txt", quote = FALSE, col.names = FALSE, row.names = FALSE)
+```
+&nbsp;
+
+## Volcano plots and MA plots
+```{r}
+# DESEQ2 plots
+deseq2_genelvl <- readRDS("./DESeq2/deseq2_genelvl_results.rds")
+deseq2_genelvl$DEG <- if_else(deseq2_genelvl$padj < 0.05,
+                            true= "Verdadero",
+                            false= "Falso")
+# volcano-plot
+ggplot(deseq2_genelvl, aes(log2FoldChange,-log10(padj), color = DEG)) + geom_point() +
+  geom_hline(yintercept = log2(1.5), color = "black", linetype = 6) + xlab("log2FC") +
+  geom_vline(xintercept = c(log2(1.5), -log2(1.5)), color = "black", linetype = 6) +
+  ylab("-log10(p-valor ajustado)") + ggtitle("DESEQ2 DEGS") +
+  scale_color_manual(values = c("#1B9E77","#D95F02","grey")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"),
+        text = element_text(size = 18 ))
+ggsave("./volcano_plots/deseq2_volcano.png")
+# ma plot
+ggplot(deseq2_genelvl, aes(log10(baseMean),log2FoldChange, color = DEG)) +
+  geom_point() +
+  geom_hline(yintercept = c(log2(1.5), -log2(1.5)), color = "black", linetype = 6) +
+  ggtitle("Distribución datos DESEQ2") + xlab("log10( Expresión promedio)") + ylab("log2FC") +
+    scale_color_manual(values = c("#1B9E77","#D95F02","grey")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"),
+        text = element_text(size= 18))
+#ggsave("./volcano_plots/deseq2_MA.png")
+# RNAseq plots
+rna_degs <- read.table("./RNA-seq data/RNA_DEGs.csv", sep = ";", header = TRUE, dec = ",")
+rna_degs$DEG <- if_else(rna_degs$minu_padj < 0.05,
+                            true= "Verdadero",
+                            false= "Falso")
+#volcano plot
+ggplot(rna_degs, aes(minu_log2FoldChange,-log10(minu_padj), color = DEG)) + geom_point() +
+  geom_hline(yintercept = log2(1.5), color = "black", linetype = 6) + xlab("log2FC") +
+  geom_vline(xintercept = c(log2(1.5), -log2(1.5)), color = "black", linetype = 6) +
+  ggtitle("RNA-seq DEGS") + ylab("-log10(p-valor ajustado)") +
+  scale_color_manual(values = c("#1B9E77","#D95F02","grey")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"),
+        text = element_text(size = 18))
+ggsave("./volcano_plots/rnaseq_volcano.png")
+# ma plot
+ggplot(rna_degs, aes(log10(baseMean),minu_log2FoldChange, color = DEG)) + geom_point() +
+  geom_hline(yintercept = c(log2(1.5), -log2(1.5)), color = "black", linetype = 6) +
+  ggtitle("Distribución datos RNA-seq") + xlab("log10( Expresión promedio)") + ylab("log2FC") +
+  scale_color_manual(values = c("#1B9E77","#D95F02","grey")) +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"),
+        text = element_text(size = 18,))
+ggsave("./volcano_plots/rnaseq_MA.png")
+
+#DRIMSEQ
+# Prepare data
+transcript_result$baseMean <- rowMeans(transcript_result[,c("col0_sum", "minu_sum")])
+transcript_result$log2FC <- log2((transcript_result$minu_sum +1) / (transcript_result$col0_sum +1))
+transcript_result$DEG <- if_else(transcript_result$adj_pvalue < 0.05,
+                            true= TRUE,
+                            false= FALSE)
+#volcano plot
+ggplot(transcript_result, aes(log2FC,-log10(adj_pvalue), color = DEG)) + geom_point() +
+  geom_hline(yintercept = log2(1.5), color = "black", linetype = 6) + xlab("log2FC") +
+  geom_vline(xintercept = log2(1.5), color = "black", linetype = 6) +
+  ggtitle("DRIMSEQ DEGS") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"),
+        element_text(size = 16))
+ggsave("./volcano_plots/drimseq_volcano.png")
+# ma plot
+ggplot(transcript_result, aes(log10(baseMean),log2FC, color = DEG)) + geom_point() +
+  geom_hline(yintercept = c(log2(1.5), -log2(1.5)), color = "grey", linetype = 6) +
+  ggtitle("DRIMSEQ Distribution") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"))
+ggsave("./volcano_plots/drimseq_MA.png")
+
+#DEXSEQ
+dex_seq <- data.frame(DEXSeqResults(dexseq_results, independentFiltering=TRUE))[,c(1:7)] %>%
+  merge(counts[,c(5:7)], by.x = "featureID" ,by.y = "feature_id")
+dex_seq$log2FC <- log2((dex_seq$minu_sum +1) / (dex_seq$col0_sum +1))
+dex_seq$DEG <- if_else(dex_seq$padj < 0.05,
+                            true= TRUE,
+                            false= FALSE)
+#volcano plot
+ggplot(dex_seq, aes(log2FC,-log10(padj), color = DEG)) + geom_point() +
+  geom_hline(yintercept = log2(1.5), color = "grey", linetype = 6) + xlab("log2FC") +
+  ggtitle("DEXSEQ DEGS") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"))
+ggsave("./volcano_plots/dexseq_volcano.png")
+# ma plot
+ggplot(dex_seq, aes(log10(exonBaseMean),log2FC, color = DEG)) + geom_point() +
+  geom_hline(yintercept = c(log2(1.5), -log2(1.5)), color = "grey", linetype = 6) +
+  ggtitle("DEXSEQ Distribution") + 
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.title.x= element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = 0.5),
+        plot.title = element_text(face = "plain", hjust = 0.5, color = "black"))
+ggsave("./volcano_plots/dexseq_MA.png")
+# RNA and DESEQ2 plot
+merge(rna_degs, deseq2_genelvl, by.x = "TAIR", by.y = "row") %>%
+  ggplot(aes(minu_log2FoldChange, log2FoldChange)) +
+  geom_point(alpha = 0.05)
+```
+
+&nbsp;
+
+# Anotacion TCs de los tres metodos
+```{r Categorias TC, message=FALSE, warning=FALSE, eval=TRUE}
+Cage_data <- readRDS("./CAGE-seq/CAGEseq_TCs.rds")
+Stripe_data <- readRDS("./Strip-seqBigwigs/TSS_calling/TCs.rds")
+TSS_data <- readRDS("./TSS-seq/TSSseq_TCs.rds")
+
+cage_anno <- data.frame(table(data.frame(rowRanges(Cage_data))[,15]))
+cage_anno$Var2 <- "CAGE-seq"
+cage_anno<- filter(cage_anno, !(Var1 %in% "antisense"))
+cage_anno$Total <- sum(cage_anno$Freq)
+
+stripe_anno <- data.frame(table(data.frame(rowRanges(Stripe_data))[,15]))
+stripe_anno$Var2 <- "STRIPE-seq"
+stripe_anno<- filter(stripe_anno, !(Var1 %in% "antisense"))
+stripe_anno$Total <- sum(stripe_anno$Freq)
+
+tss_anno <- data.frame(table(data.frame(rowRanges(TSS_data))[,15]))
+tss_anno$Var2 <- "TSS-seq"
+tss_anno<- filter(tss_anno, !(Var1 %in% "antisense"))
+tss_anno$Total <- sum(tss_anno$Freq)
+
+ann_data <- rbind(cage_anno, stripe_anno, tss_anno)
+
+ann_data <- rbind(ann_data, data.frame(
+  Var1 = c("gene_body"),
+  Freq = c(0),
+  Var2 = c("CAGE-seq", "STRIPE-seq", "TSS-seq"),
+  Total = c(24875, 25501, 27251)
+))
+
+ann_data[ann_data$Var1 == "gene_body" & ann_data$Var2 == "CAGE-seq", "Freq"] <- c(
+  sum(ann_data[ann_data$Var1 %in% c("exon", "intron", "CDS") & ann_data$Var2 == "CAGE-seq", "Freq"])
+)
+
+ann_data[ann_data$Var1 == "gene_body" & ann_data$Var2 == "TSS-seq", "Freq"] <- c(
+  sum(ann_data[ann_data$Var1 %in% c("exon", "intron", "CDS") & ann_data$Var2 == "TSS-seq", "Freq"])
+)
+
+ann_data[ann_data$Var1 == "gene_body" & ann_data$Var2 == "STRIPE-seq", "Freq"] <- c(
+  sum(ann_data[ann_data$Var1 %in% c("exon", "intron", "CDS") & ann_data$Var2 == "STRIPE-seq", "Freq"])
+)
+
+ann_data <- filter(ann_data,!(Var1 %in% c("intron", "exon", "CDS")))
+ann_data$Freq2 <- ann_data$Freq / ann_data$Total * 100
+
+
+ann_data %>%
+  ggplot(aes(Freq2, Var2, fill = Var1)) +
+  geom_bar(stat = "identity") +
+  scale_fill_brewer(type = "qual", palette = "Set2") +
+  scale_x_continuous(expand = c(0, 0), limits = c(0, 100)) +
+  scale_y_discrete(expand = c(0, 0)) +
+  xlab("Frecuencia (%)") +
+  theme_bw() +
+  theme(panel.grid = element_blank(), panel.border = element_blank(),
+        axis.title.y = element_blank(),
+        axis.line = element_line(size = 0.25), legend.title = element_blank())
+
+ggsave("Figuras/barplot_anotaciones.png")
+```
+
+&nbsp;
+
+# Overlap entre los tres métodos
+```{r Overlap TCs, message=FALSE, warning=FALSE, eval=TRUE}
+datos <- read.table("tcs_combined.txt", header = T)
+colors <- c("#1B9E77", "#D95F02", "#7570B3")
+brewer.pal(3, "Dark2")
+
+svg("Venn_tcs_combined.svg", height = 3, width = 3)
+euler(
+  combinations = list(
+    CAGE = datos[datos$CAGE == "True", "name"],
+    TSS = datos[datos$TSS == "True", "name"],
+    STRIPE = datos[datos$STRIPE == "True", "name"]
+  )
+) %>% plot(quantities = T, fill = NA, edge = colors[c(2,3,1)], labels = T)
+dev.off()
+```
+
+
+
