@@ -1,4 +1,4 @@
-# STRIPE-seq-Data-processing
+# STRIPE-seq-Data-processing and TSS detection
 This repository contains the pipeline for STRIPE-seq to perform TSS detection and DTU analysis( Differential TSS usage).
 ####### STRIPE-seq processing #######
 The folder "Snake_file" contains the code for processing and alignment for STRIPE-seq Data, 
